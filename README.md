@@ -1,69 +1,83 @@
-# Kafka Producer/Consumer with Spring Boot
+# Kafka Producer–Consumer Demo (Spring Boot + KRaft Mode)
 
-A simple messaging demo built with **Apache Kafka (KRaft mode)** and **Spring Boot**.
-It has two independent Spring Boot applications:
+A minimal end-to-end messaging demo built with **Apache Kafka** (running in **KRaft mode**, no ZooKeeper) and **Spring Boot**. It consists of two independent Spring Boot applications communicating through a Kafka topic.
 
-- **kafka_producer** — exposes a REST endpoint that publishes a message to a Kafka topic.
-- **kafka_consumer** — listens to the same topic and consumes incoming messages.
+| App | Role | Description |
+|---|---|---|
+| `kafka_producer` | Producer | Exposes a REST endpoint that publishes messages to Kafka |
+| `kafka_consumer` | Consumer | Subscribes to the topic and consumes incoming messages |
+
+---
+
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [1. Start Kafka (KRaft Mode)](#1-start-kafka-kraft-mode)
+- [2. Run the Consumer](#2-run-the-consumer)
+- [3. Run the Producer](#3-run-the-producer)
+- [4. Send a Test Message](#4-send-a-test-message)
+- [Consumer Groups & Partition Assignment](#consumer-groups--partition-assignment)
+- [Notes](#notes)
+
+---
 
 ## Architecture
 
 ```
-Postman (HTTP GET)
-      |
-      v
-Producer App  --(publishes to topic "JT")-->  Kafka Broker (KRaft mode)
-                                                       |
-                                                       v
-                                                 Consumer App
+        HTTP GET
+Postman ────────► Producer App ────► Topic: "orders" ────► Consumer App
+                  (port 9191)          (Kafka Broker)
 ```
 
 ## Prerequisites
 
-- Java 17+ (or whatever JDK the projects target)
-- Apache Kafka (downloaded, not necessarily installed as a service)
-- Postman (or any HTTP client) for manual testing
+- Java 17+
+- Apache Kafka distribution downloaded locally (no separate ZooKeeper needed — KRaft mode)
+- Postman or any HTTP client, for manual testing
 
-## 1. Start Kafka in KRaft mode
+---
 
-Kafka is run **without ZooKeeper**, using KRaft mode. From the Kafka installation folder:
+## 1. Start Kafka (KRaft Mode)
+
+From the Kafka installation directory:
 
 ```bash
-# 1. Generate a Cluster UUID
-KAFKA_CLUSTER_ID="$(bin/kafka-storage.sh random-uuid)"
+# Generate a Cluster UUID
+$KAFKA_CLUSTER_ID=(bin/kafka-storage.sh random-uuid)
 
-# 2. Format the log directories
-bin/kafka-storage.sh format --standalone -t $KAFKA_CLUSTER_ID -c config/server.properties
+# Format the log directories
+bin/windows/kafka-storage.bat format --standalone -t $KAFKA_CLUSTER_ID -c config/server.properties
 
-# 3. Start the Kafka server
-bin/kafka-server-start.sh config/server.properties
+# Start the broker
+bin/windows/kafka-server-start.bat config/server.properties
 ```
 
-Leave this terminal running — this is the Kafka broker.
+Keep this terminal open — it is running the Kafka broker itself.
 
 ## 2. Run the Consumer
 
-In a separate terminal, go to the consumer project folder and run:
+In a new terminal, from the `kafka_consumer` project folder:
 
 ```bash
 ./mvnw spring-boot:run
 ```
 
-The consumer starts listening on the configured topic (`JT`) and will print every message it receives.
+The consumer joins its configured **consumer group** and starts listening on the `orders` topic (see [Consumer Groups](#consumer-groups--partition-assignment) below for how partitions are assigned).
 
 ## 3. Run the Producer
 
-In a third terminal, go to the producer project folder and run:
+In another terminal, from the `kafka_producer` project folder:
 
 ```bash
 ./mvnw spring-boot:run
 ```
 
-By default it starts on port `9191` (as configured in `application.properties`).
+The producer app starts on `localhost:9191` by default (configured in `application.properties`).
 
-## 4. Send a test message (via Postman)
+## 4. Send a Test Message
 
-With both apps running, send a **GET** request to:
+With the broker, consumer, and producer all running, send a **GET** request:
 
 ```
 http://localhost:9191/producer-app/publish/{message}
@@ -72,7 +86,7 @@ http://localhost:9191/producer-app/publish/{message}
 Example:
 
 ```
-http://localhost:9191/producer-app/publish/HelloKafka
+http://localhost:9191/producer-app/publish/Order-1001
 ```
 
 Expected response:
@@ -81,10 +95,27 @@ Expected response:
 Message published successfully...
 ```
 
-You should immediately see the message logged in the **consumer** terminal, and the producer terminal will log the topic offset it was written to.
+The message should immediately appear in the consumer's terminal log, and the producer will log the partition offset it was written to.
+
+---
+
+## Consumer Groups & Partition Assignment
+
+Kafka distributes the messages of a topic across **partitions**, and consumers read from those partitions as members of a **Consumer Group** (identified by `group.id`). Understanding this mapping is essential for scaling consumers correctly:
+
+- **Single consumer:** it must be assigned a `group.id` so Kafka knows which offset/topic state to track for it — even a lone consumer belongs to a group.
+- **Consumers = Partitions** (e.g. 3 consumers in the same group, topic has 3 partitions): each consumer is assigned exactly **one partition**. This is the ideal setup — maximum parallelism, no consumer is idle.
+- **Consumers < Partitions** (e.g. 1 consumer, 3 partitions): that single consumer ends up handling **all 3 partitions itself**, processing messages sequentially — slower throughput, since parallelism is lost.
+- **Consumers > Partitions** (e.g. 4 consumers, 3 partitions): only 3 consumers get assigned a partition; the 4th stays **idle**, waiting on standby. If one of the active consumers fails or leaves the group, Kafka triggers a **rebalance**, and the idle consumer is automatically assigned the freed partition.
+
+**Rule of thumb:** the number of consumer instances in a group should not exceed the number of partitions on the topic — extra instances add redundancy for failover, not extra throughput.
+
+> **Rebalancing** is the process where Kafka redistributes partitions among the active members of a consumer group whenever a consumer joins, leaves, or crashes.
+
+---
 
 ## Notes
 
-- Topic used: `orders`
-- Endpoint is a `GET` for quick manual testing; a real-world API should use `POST` with a request body instead of a path variable.
-- Order of startup matters: **Kafka broker → Consumer → Producer**, so the consumer is already subscribed before any message is sent.
+- **Topic name:** `orders`
+- The publish endpoint uses `GET` with a path variable for quick manual testing. In a production API this should be a `POST` with a JSON request body instead.
+- Startup order matters: **Kafka broker → Consumer → Producer**, so the consumer is already subscribed and ready before any message is sent.
